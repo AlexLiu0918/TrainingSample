@@ -1,0 +1,468 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop, 'build/*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-tests:
+    name: Rust Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install OpenCV and LLVM dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config clang libclang-dev llvm-dev wget cmake build-essential
+        # Install LLVM 18 which has the proper libclang.so symlink
+        sudo apt-get install -y llvm-18 llvm-18-dev llvm-18-tools libclang1-18 libclang-cpp18
+        # Set environment variables for LLVM 18
+        echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+        echo "LLVM_CONFIG_PATH=/usr/bin/llvm-config-18" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        # Verify the key files exist
+        ls -la /usr/lib/llvm-18/lib/libclang.so
+        which llvm-config-18
+
+        # Build OpenCV 4.11 from source since Ubuntu 24.04 only has 4.6
+        echo "Building OpenCV 4.11 from source..."
+        cd /tmp
+        wget -q https://github.com/opencv/opencv/archive/4.11.0.tar.gz
+        tar -xzf 4.11.0.tar.gz
+        cd opencv-4.11.0
+        mkdir build
+        cd build
+        cmake \
+          -DCMAKE_BUILD_TYPE=RELEASE \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DWITH_CUDA=OFF \
+          -DWITH_OPENGL=OFF \
+          -DWITH_OPENCL=OFF \
+          -DWITH_TBB=OFF \
+          -DWITH_IPP=OFF \
+          -DWITH_1394=OFF \
+          -DWITH_V4L=OFF \
+          -DWITH_GTK=OFF \
+          -DBUILD_TESTS=OFF \
+          -DBUILD_PERF_TESTS=OFF \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_opencv_python2=OFF \
+          -DBUILD_opencv_python3=OFF \
+          -DBUILD_opencv_java=OFF \
+          -DOPENCV_GENERATE_PKGCONFIG=ON \
+          ..
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+
+        # Set OpenCV environment variables
+        echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.89
+        components: rustfmt, clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo target
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      run: cargo clippy --all-targets --no-default-features --features python-bindings,simd,opencv -- -D warnings
+
+    - name: Run tests (no Python bindings)
+      run: cargo test --no-default-features --features simd,opencv
+
+    - name: Compile tests (Linux compatible features)
+      run: cargo test --no-default-features --features python-bindings,simd,opencv --no-run
+
+  python-tests:
+    name: Python Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install OpenCV and LLVM dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config clang libclang-dev llvm-dev wget cmake build-essential
+        # Install LLVM 18 which has the proper libclang.so symlink
+        sudo apt-get install -y llvm-18 llvm-18-dev llvm-18-tools libclang1-18 libclang-cpp18
+        # Set environment variables for LLVM 18
+        echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+        echo "LLVM_CONFIG_PATH=/usr/bin/llvm-config-18" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        # Verify the key files exist
+        ls -la /usr/lib/llvm-18/lib/libclang.so
+        which llvm-config-18
+
+        # Build OpenCV 4.11 from source since Ubuntu 24.04 only has 4.6
+        echo "Building OpenCV 4.11 from source..."
+        cd /tmp
+        wget -q https://github.com/opencv/opencv/archive/4.11.0.tar.gz
+        tar -xzf 4.11.0.tar.gz
+        cd opencv-4.11.0
+        mkdir build
+        cd build
+        cmake \
+          -DCMAKE_BUILD_TYPE=RELEASE \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DWITH_CUDA=OFF \
+          -DWITH_OPENGL=OFF \
+          -DWITH_OPENCL=OFF \
+          -DWITH_TBB=OFF \
+          -DWITH_IPP=OFF \
+          -DWITH_1394=OFF \
+          -DWITH_V4L=OFF \
+          -DWITH_GTK=OFF \
+          -DBUILD_TESTS=OFF \
+          -DBUILD_PERF_TESTS=OFF \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_opencv_python2=OFF \
+          -DBUILD_opencv_python3=OFF \
+          -DBUILD_opencv_java=OFF \
+          -DOPENCV_GENERATE_PKGCONFIG=ON \
+          ..
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+
+        # Set OpenCV environment variables
+        echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.89
+        components: rustfmt, clippy
+
+    - name: Install maturin (Linux/macOS)
+      run: pip install maturin[patchelf]
+
+    - name: Build Python package (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        mkdir -p dist
+        maturin build --release --out dist --no-default-features --features python-bindings,simd,opencv
+
+    - name: Build Python package (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        mkdir -p dist
+        maturin build --release --out dist --no-default-features --features python-bindings,simd,metal
+
+    - name: Install built package (Linux/macOS)
+      run: pip install dist/*.whl
+
+    - name: Install test dependencies
+      run: pip install pytest pytest-benchmark numpy pillow opencv-python
+
+    - name: Run Python tests
+      run: pytest tests/ -v
+
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install OpenCV and LLVM dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config clang libclang-dev llvm-dev wget cmake build-essential
+        # Install LLVM 18 which has the proper libclang.so symlink
+        sudo apt-get install -y llvm-18 llvm-18-dev llvm-18-tools libclang1-18 libclang-cpp18
+        # Set environment variables for LLVM 18
+        echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+        echo "LLVM_CONFIG_PATH=/usr/bin/llvm-config-18" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        # Verify the key files exist
+        ls -la /usr/lib/llvm-18/lib/libclang.so
+        which llvm-config-18
+
+        # Build OpenCV 4.11 from source since Ubuntu 24.04 only has 4.6
+        echo "Building OpenCV 4.11 from source..."
+        cd /tmp
+        wget -q https://github.com/opencv/opencv/archive/4.11.0.tar.gz
+        tar -xzf 4.11.0.tar.gz
+        cd opencv-4.11.0
+        mkdir build
+        cd build
+        cmake \
+          -DCMAKE_BUILD_TYPE=RELEASE \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DWITH_CUDA=OFF \
+          -DWITH_OPENGL=OFF \
+          -DWITH_OPENCL=OFF \
+          -DWITH_TBB=OFF \
+          -DWITH_IPP=OFF \
+          -DWITH_1394=OFF \
+          -DWITH_V4L=OFF \
+          -DWITH_GTK=OFF \
+          -DBUILD_TESTS=OFF \
+          -DBUILD_PERF_TESTS=OFF \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_opencv_python2=OFF \
+          -DBUILD_opencv_python3=OFF \
+          -DBUILD_opencv_java=OFF \
+          -DOPENCV_GENERATE_PKGCONFIG=ON \
+          ..
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+
+        # Set OpenCV environment variables
+        echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.89
+        components: rustfmt, clippy
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+
+    - name: Install pre-commit
+      run: pip install pre-commit
+
+    - name: Run pre-commit
+      run: pre-commit run --all-files
+
+  build-wheels:
+    name: Build wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install OpenCV and LLVM dependencies (Ubuntu)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config clang libclang-dev llvm-dev wget cmake build-essential
+        # Install LLVM 18 which has the proper libclang.so symlink
+        sudo apt-get install -y llvm-18 llvm-18-dev llvm-18-tools libclang1-18 libclang-cpp18
+        # Set environment variables for LLVM 18
+        echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+        echo "LLVM_CONFIG_PATH=/usr/bin/llvm-config-18" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/lib/llvm-18/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        # Verify the key files exist
+        ls -la /usr/lib/llvm-18/lib/libclang.so
+        which llvm-config-18
+
+        # Build OpenCV 4.11 from source since Ubuntu 24.04 only has 4.6
+        echo "Building OpenCV 4.11 from source..."
+        cd /tmp
+        wget -q https://github.com/opencv/opencv/archive/4.11.0.tar.gz
+        tar -xzf 4.11.0.tar.gz
+        cd opencv-4.11.0
+        mkdir build
+        cd build
+        cmake \
+          -DCMAKE_BUILD_TYPE=RELEASE \
+          -DCMAKE_INSTALL_PREFIX=/usr/local \
+          -DWITH_CUDA=OFF \
+          -DWITH_OPENGL=OFF \
+          -DWITH_OPENCL=OFF \
+          -DWITH_TBB=OFF \
+          -DWITH_IPP=OFF \
+          -DWITH_1394=OFF \
+          -DWITH_V4L=OFF \
+          -DWITH_GTK=OFF \
+          -DBUILD_TESTS=OFF \
+          -DBUILD_PERF_TESTS=OFF \
+          -DBUILD_EXAMPLES=OFF \
+          -DBUILD_opencv_python2=OFF \
+          -DBUILD_opencv_python3=OFF \
+          -DBUILD_opencv_java=OFF \
+          -DOPENCV_GENERATE_PKGCONFIG=ON \
+          ..
+        make -j$(nproc)
+        sudo make install
+        sudo ldconfig
+
+        # Set OpenCV environment variables
+        echo "PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+
+
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: 1.89
+
+    - name: Install maturin (Linux/macOS)
+      run: pip install maturin[patchelf]
+
+    - name: Install OpenCV build dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        # Build against a pinned OpenCV version instead of Homebrew's moving target
+        brew install llvm cmake nasm pkg-config
+        # Set up LLVM environment for opencv-rust bindings (keg-only installation)
+        echo "LIBCLANG_PATH=/opt/homebrew/opt/llvm/lib" >> $GITHUB_ENV
+        echo "LLVM_CONFIG_PATH=/opt/homebrew/opt/llvm/bin/llvm-config" >> $GITHUB_ENV
+        echo "DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib:$DYLD_LIBRARY_PATH" >> $GITHUB_ENV
+
+    - name: Build static OpenCV (macOS)
+      if: runner.os == 'macOS'
+      run: ./scripts/build-opencv-static.sh
+
+    - name: Build wheels (Linux)
+      if: runner.os == 'Linux'
+      run: maturin build --release --out dist --no-default-features --features python-bindings,simd,opencv
+
+    - name: Build wheels (macOS)
+      if: runner.os == 'macOS'
+      run: maturin build --release --out dist --no-default-features --features python-bindings,simd,opencv,metal
+      env:
+        OPENCV_INCLUDE_PATHS: ${{ github.workspace }}/third_party/opencv-static/include/opencv4
+        OPENCV_LINK_PATHS: ${{ github.workspace }}/third_party/opencv-static/lib
+        OPENCV_LINK_LIBS: static=opencv_world,static=avformat,static=avcodec,static=avfilter,static=swresample,static=swscale,static=avutil,static=jpeg,static=png,static=tiff,static=webp,static=jasper,framework=Accelerate,dylib=c++,framework=OpenCL,z
+        OPENCV_DISABLE_PROBES: pkg_config,cmake,vcpkg,vcpkg_cmake
+
+
+    - name: Upload wheels
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-${{ matrix.os }}
+        path: dist/
+
+  build-wheels-aarch64:
+    name: Build wheels (Linux aarch64 / DGX Spark)
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python }}
+
+    - name: Cache static OpenCV
+      uses: actions/cache@v4
+      with:
+        path: third_party/opencv-static
+        key: opencv-static-4.11.0-codecs-jasper-ffmpeg-no-itt-no-openjpeg-linux-aarch64-${{ runner.arch }}-manylinux_2_39
+
+    - name: Install build dependencies
+      run: |
+        export DEBIAN_FRONTEND=noninteractive
+
+        sudo apt-get update
+        sudo apt-get install -y pkg-config clang libclang-dev llvm-dev wget cmake build-essential curl nasm yasm
+
+        sudo apt-get install -y llvm-18 llvm-18-dev llvm-18-tools libclang1-18 libclang-cpp18
+        echo "LLVM_CONFIG_PATH=/usr/bin/llvm-config-18" >> $GITHUB_ENV
+
+        LIBCLANG_PATH="/usr/lib/llvm-18/lib"
+        if [ ! -f "$LIBCLANG_PATH/libclang.so" ]; then
+          LIBCLANG_PATH=$(find /usr/lib/llvm* -name "libclang.so" 2>/dev/null | head -1 | xargs dirname)
+        fi
+
+        echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$LIBCLANG_PATH:$LD_LIBRARY_PATH" >> $GITHUB_ENV
+        echo "Using libclang.so at: $LIBCLANG_PATH/libclang.so"
+
+    - name: Build static OpenCV
+      run: ./scripts/build-opencv-static.sh
+
+    - name: Build wheels
+      uses: PyO3/maturin-action@v1
+      with:
+        target: aarch64
+        args: --release --out dist --no-default-features --features python-bindings,simd,opencv
+        sccache: 'false'
+        container: off
+        manylinux: manylinux_2_39
+      env:
+        PYO3_USE_ABI3_FORWARD_COMPATIBILITY: '1'
+        LIBCLANG_PATH: ${{ env.LIBCLANG_PATH }}
+        LLVM_CONFIG_PATH: ${{ env.LLVM_CONFIG_PATH }}
+        OPENCV_INCLUDE_PATHS: ${{ github.workspace }}/third_party/opencv-static/include/opencv4
+        OPENCV_LINK_PATHS: ${{ github.workspace }}/third_party/opencv-static/lib
+        OPENCV_LINK_LIBS: static=opencv_world,static=avformat,static=avcodec,static=avfilter,static=swresample,static=swscale,static=avutil,static=jpeg,static=png,static=tiff,static=webp,static=z,static=jasper,dylib=stdc++
+        OPENCV_DISABLE_PROBES: pkg_config,cmake,vcpkg,vcpkg_cmake
+
+    - name: Repair wheels
+      env:
+        OPENCV_LINK_PATHS: ${{ github.workspace }}/third_party/opencv-static/lib
+      run: ./scripts/repair-wheel.sh dist/*.whl
+
+    - name: Prune unrepaired wheels
+      run: find dist -type f -name '*.linux_*.whl' -print -delete
+
+    - name: Install built wheel
+      run: |
+        wheel="$(find dist -type f -name '*.whl' | sort | head -n 1)"
+        if [ -z "${wheel}" ]; then
+          echo "No wheel files found under dist/"
+          find dist -maxdepth 3 -type f || true
+          exit 1
+        fi
+        pip install "${wheel}"
+        python -c 'import trainingsample'
+
+    - name: Upload wheels
+      uses: actions/upload-artifact@v4
+      with:
+        name: wheels-linux-aarch64-py${{ matrix.python }}
+        path: dist/
