@@ -1,0 +1,335 @@
+use anyhow::Result;
+use ndarray::{Array3, ArrayView3};
+
+#[cfg(feature = "opencv")]
+use opencv::{
+    core::{AlgorithmHint, Mat},
+    imgproc::{cvt_color, resize, COLOR_RGB2GRAY, INTER_LANCZOS4, INTER_LINEAR},
+    prelude::*,
+};
+
+/// OpenCV-powered batch resize operations for maximum performance parity
+#[cfg(feature = "opencv")]
+pub struct OpenCVBatchProcessor;
+
+#[cfg(feature = "opencv")]
+impl Default for OpenCVBatchProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "opencv")]
+impl OpenCVBatchProcessor {
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Batch resize using OpenCV's optimized implementation (benchmark winner)
+    pub fn batch_resize_images(
+        &self,
+        images: &[ArrayView3<u8>],
+        target_sizes: &[(u32, u32)], // (width, height)
+    ) -> Result<Vec<Array3<u8>>> {
+        self.batch_resize_images_with_interpolation(images, target_sizes, INTER_LINEAR)
+    }
+
+    fn batch_resize_images_with_interpolation(
+        &self,
+        images: &[ArrayView3<u8>],
+        target_sizes: &[(u32, u32)], // (width, height)
+        interpolation: i32,
+    ) -> Result<Vec<Array3<u8>>> {
+        if images.len() != target_sizes.len() {
+            anyhow::bail!("Number of images and target sizes must match");
+        }
+
+        let results: Vec<_> = images
+            .iter()
+            .zip(target_sizes.iter())
+            .map(|(image, &(target_width, target_height))| {
+                self.resize_single_opencv(image, target_width, target_height, interpolation)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(results)
+    }
+
+    /// Batch video resize using OpenCV
+    pub fn batch_resize_videos(
+        &self,
+        videos: &[ndarray::ArrayView4<u8>],
+        target_sizes: &[(u32, u32)], // (width, height)
+    ) -> Result<Vec<ndarray::Array4<u8>>> {
+        if videos.len() != target_sizes.len() {
+            anyhow::bail!("Number of videos and target sizes must match");
+        }
+
+        // ULTRA-OPTIMIZED: Flatten all frames from all videos into one massive batch
+        let mut all_frames = Vec::new();
+        let mut all_target_sizes = Vec::new();
+        let mut video_frame_counts = Vec::new();
+
+        for (video, &target_size) in videos.iter().zip(target_sizes.iter()) {
+            let (frames, _, _, _) = video.dim();
+            video_frame_counts.push(frames);
+
+            // Collect all frames from this video
+            for frame_idx in 0..frames {
+                let frame = video.index_axis(ndarray::Axis(0), frame_idx);
+                all_frames.push(frame);
+                all_target_sizes.push(target_size);
+            }
+        }
+
+        // Process ALL frames in one giant batch operation - maximum efficiency!
+        let resized_frames = self.batch_resize_images(&all_frames, &all_target_sizes)?;
+
+        // Reconstruct video structure from flattened results
+        let mut results = Vec::new();
+        let mut frame_idx = 0;
+
+        for (video_idx, frame_count) in video_frame_counts.iter().enumerate() {
+            let (target_width, target_height) = target_sizes[video_idx];
+            let result_shape = (
+                *frame_count,
+                target_height as usize,
+                target_width as usize,
+                3,
+            );
+            let mut video_result = ndarray::Array4::<u8>::zeros(result_shape);
+
+            // Copy frames for this video
+            for local_frame_idx in 0..*frame_count {
+                let global_frame = &resized_frames[frame_idx];
+                video_result
+                    .index_axis_mut(ndarray::Axis(0), local_frame_idx)
+                    .assign(global_frame);
+                frame_idx += 1;
+            }
+
+            results.push(video_result);
+        }
+
+        Ok(results)
+    }
+
+    /// Batch resize using OpenCV's optimized LANCZOS4 implementation
+    pub fn batch_resize_lanczos4(
+        &self,
+        images: &[ArrayView3<u8>],
+        target_sizes: &[(u32, u32)], // (width, height)
+    ) -> Result<Vec<Array3<u8>>> {
+        self.batch_resize_images_with_interpolation(images, target_sizes, INTER_LANCZOS4)
+    }
+
+    /// Single image resize using OpenCV
+    fn resize_single_opencv(
+        &self,
+        image: &ArrayView3<u8>,
+        target_width: u32,
+        target_height: u32,
+        interpolation: i32,
+    ) -> Result<Array3<u8>> {
+        let (height, width, channels) = image.dim();
+
+        if channels != 3 {
+            anyhow::bail!("Only 3-channel RGB images are supported");
+        }
+
+        let data_slice = image
+            .as_slice()
+            .ok_or_else(|| anyhow::anyhow!("Image data is not contiguous"))?;
+        let src_height = i32::try_from(height)?;
+        let src_width = i32::try_from(width)?;
+        let dst_height = i32::try_from(target_height)?;
+        let dst_width = i32::try_from(target_width)?;
+
+        // OpenCV only needs lightweight Mat headers here. Point them at the
+        // ndarray storage so resize can read the input and write the final
+        // output without copying either full image through an intermediate Mat.
+        let src_mat = unsafe {
+            Mat::new_rows_cols_with_data_unsafe(
+                src_height,
+                src_width,
+                opencv::core::CV_8UC3,
+                data_slice.as_ptr() as *mut std::ffi::c_void,
+                opencv::core::Mat_AUTO_STEP,
+            )?
+        };
+
+        let mut result =
+            Array3::<u8>::zeros((target_height as usize, target_width as usize, channels));
+        let mut dst_mat = unsafe {
+            Mat::new_rows_cols_with_data_unsafe(
+                dst_height,
+                dst_width,
+                opencv::core::CV_8UC3,
+                result.as_mut_ptr() as *mut std::ffi::c_void,
+                opencv::core::Mat_AUTO_STEP,
+            )?
+        };
+
+        resize(
+            &src_mat,
+            &mut dst_mat,
+            opencv::core::Size::new(dst_width, dst_height),
+            0.0,
+            0.0,
+            interpolation,
+        )?;
+
+        Ok(result)
+    }
+
+    // Single video resize function removed - now using batch_resize_videos for all operations
+
+    /// Batch luminance calculation using OpenCV's cvtColor
+    pub fn batch_calculate_luminance_opencv(&self, images: &[ArrayView3<u8>]) -> Result<Vec<f64>> {
+        images
+            .iter()
+            .map(|image| self.calculate_luminance_single_opencv(image))
+            .collect()
+    }
+
+    /// Single image luminance using OpenCV
+    fn calculate_luminance_single_opencv(&self, image: &ArrayView3<u8>) -> Result<f64> {
+        let (_height, _width, channels) = image.dim();
+
+        if channels != 3 {
+            anyhow::bail!("Only 3-channel RGB images are supported");
+        }
+
+        // Convert to OpenCV Mat
+        let src_mat = self.ndarray_to_mat(image)?;
+
+        // Convert to grayscale using OpenCV's optimized implementation
+        let mut gray_mat = Mat::default();
+        cvt_color(
+            &src_mat,
+            &mut gray_mat,
+            COLOR_RGB2GRAY,
+            0,
+            AlgorithmHint::ALGO_HINT_ACCURATE,
+        )?;
+
+        // Calculate mean (luminance)
+        let mean_scalar = opencv::core::mean(&gray_mat, &opencv::core::no_array())?;
+        Ok(mean_scalar[0])
+    }
+
+    /// Convert ndarray to OpenCV Mat (optimized for performance)
+    fn ndarray_to_mat(&self, image: &ArrayView3<u8>) -> Result<Mat> {
+        let (height, width, channels) = image.dim();
+
+        if channels != 3 {
+            anyhow::bail!("Only 3-channel RGB images are supported");
+        }
+
+        let data_slice = image
+            .as_slice()
+            .ok_or_else(|| anyhow::anyhow!("Image data is not contiguous"))?;
+
+        // ULTRA-OPTIMIZED: Create Mat directly from contiguous data using bulk copy
+        let mut mat = Mat::new_size_with_default(
+            opencv::core::Size::new(width as i32, height as i32),
+            opencv::core::CV_8UC3,
+            opencv::core::Scalar::default(),
+        )?;
+
+        // Use bulk memory copy instead of pixel-by-pixel copying
+        unsafe {
+            let dst_ptr = mat.ptr_mut(0)?;
+            std::ptr::copy_nonoverlapping(data_slice.as_ptr(), dst_ptr, height * width * channels);
+        }
+
+        Ok(mat)
+    }
+}
+
+// HIGH-PERFORMANCE RESIZE WRAPPERS (REPLACE METAL GPU FUNCTIONS)
+// These provide the same API as the removed Metal functions but use OpenCV
+
+#[cfg(feature = "opencv")]
+pub fn resize_bilinear_opencv(
+    image: &ArrayView3<u8>,
+    target_width: u32,
+    target_height: u32,
+) -> Result<Array3<u8>> {
+    let processor = OpenCVBatchProcessor::new();
+    processor.resize_single_opencv(image, target_width, target_height, INTER_LINEAR)
+}
+
+#[cfg(feature = "opencv")]
+pub fn resize_lanczos4_opencv(
+    image: &ArrayView3<u8>,
+    target_width: u32,
+    target_height: u32,
+) -> Result<Array3<u8>> {
+    let processor = OpenCVBatchProcessor::new();
+    processor.resize_single_opencv(image, target_width, target_height, INTER_LANCZOS4)
+}
+
+#[cfg(not(feature = "opencv"))]
+pub fn resize_bilinear_opencv(
+    _image: &ArrayView3<u8>,
+    _target_width: u32,
+    _target_height: u32,
+) -> Result<Array3<u8>> {
+    anyhow::bail!("OpenCV feature not enabled. Rebuild with --features opencv")
+}
+
+#[cfg(not(feature = "opencv"))]
+pub fn resize_lanczos4_opencv(
+    _image: &ArrayView3<u8>,
+    _target_width: u32,
+    _target_height: u32,
+) -> Result<Array3<u8>> {
+    anyhow::bail!("OpenCV feature not enabled. Rebuild with --features opencv")
+}
+
+/// Fallback implementations when OpenCV is not available
+#[cfg(not(feature = "opencv"))]
+pub struct OpenCVBatchProcessor;
+
+#[cfg(not(feature = "opencv"))]
+impl Default for OpenCVBatchProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(feature = "opencv"))]
+impl OpenCVBatchProcessor {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn batch_resize_images(
+        &self,
+        _images: &[ArrayView3<u8>],
+        _target_sizes: &[(u32, u32)],
+    ) -> Result<Vec<Array3<u8>>> {
+        anyhow::bail!("OpenCV feature not enabled. Rebuild with --features opencv")
+    }
+
+    pub fn batch_resize_videos(
+        &self,
+        _videos: &[ndarray::ArrayView4<u8>],
+        _target_sizes: &[(u32, u32)],
+    ) -> Result<Vec<ndarray::Array4<u8>>> {
+        anyhow::bail!("OpenCV feature not enabled. Rebuild with --features opencv")
+    }
+
+    pub fn batch_resize_lanczos4(
+        &self,
+        _images: &[ArrayView3<u8>],
+        _target_sizes: &[(u32, u32)],
+    ) -> Result<Vec<Array3<u8>>> {
+        anyhow::bail!("OpenCV feature not enabled. Rebuild with --features opencv")
+    }
+
+    pub fn batch_calculate_luminance_opencv(&self, _images: &[ArrayView3<u8>]) -> Result<Vec<f64>> {
+        anyhow::bail!("OpenCV feature not enabled. Rebuild with --features opencv")
+    }
+}
